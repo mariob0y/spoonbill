@@ -1,9 +1,14 @@
+import logging
 import pathlib
 import shutil
 
 from click.testing import CliRunner
 
 from spoonbill.cli import cli
+from spoonbill.utils import RepeatFilter
+
+LOGGER = logging.getLogger("spoonbill")
+LOGGER.addFilter(RepeatFilter())
 
 FILENAME = pathlib.Path("tests/data/ocds-sample-data.json").absolute()
 SCHEMA = pathlib.Path("tests/data/ocds-simplified-schema.json").absolute()
@@ -180,3 +185,15 @@ def test_table_stats():
         assert "planning: 1 rows" in result.output
         assert "parties: 8 rows" in result.output
         assert "└-----parties_ids: 14 rows" in result.output
+
+
+def test_message_repeat(capsys):
+    message = "Around the world, around the world"
+
+    LOGGER.warning(message)
+    LOGGER.warning(message)
+    LOGGER.warning(message)
+
+    captured = capsys.readouterr()
+
+    assert captured.out.count(message) == 1
