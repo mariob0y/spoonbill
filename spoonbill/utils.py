@@ -10,6 +10,7 @@ from pathlib import Path
 
 import ijson
 import requests
+from ocdskit.util import detect_format
 
 from spoonbill.common import DEFAULT_FIELDS_COMBINED
 
@@ -73,7 +74,16 @@ def iter_file(fd, root):
     >>> len([r for r in iter_file(open('tests/data/ocds-sample-data.json', 'rb'), 'releases')])
     6
     """
-    reader = ijson.items(fd, f"{root}.item", map_type=OrderedDict)
+
+    (
+        input_format,
+        _is_concatenated,
+        _is_array,
+    ) = detect_format(fd.name)
+
+    reader = ijson.items(fd, f"{root}.item")
+    if input_format == "release":
+        reader = ijson.items(fd, "", multiple_values=True)
     for item in reader:
         yield item
 
