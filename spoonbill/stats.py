@@ -8,7 +8,7 @@ from typing import List, Mapping
 import jsonref
 from flatten_dict import flatten
 
-from spoonbill.common import ARRAY, COMBINED_TABLES, JOINABLE, JOINABLE_SEPARATOR, PREVIEW_ROWS, TABLE_THRESHOLD
+from spoonbill.common import ARRAY, JOINABLE, JOINABLE_SEPARATOR, PREVIEW_ROWS, SEPARATOR, TABLE_THRESHOLD
 from spoonbill.i18n import LOCALE, _
 from spoonbill.rowdata import Rows
 from spoonbill.spec import Table, add_child_table
@@ -19,8 +19,6 @@ from spoonbill.utils import (
     extract_type,
     generate_table_name,
     get_matching_tables,
-    get_root,
-    recalculate_headers,
     resolve_file_uri,
     validate_type,
 )
@@ -52,7 +50,6 @@ class DataPreprocessor:
         tables: Mapping[str, Table] = None,
         table_threshold=TABLE_THRESHOLD,
         total_items=0,
-        header_separator="/",
         language=LOCALE,
         multiple_values=False,
         with_preview=False,
@@ -64,7 +61,6 @@ class DataPreprocessor:
         self.table_threshold = table_threshold
         self.multiple_values = multiple_values
 
-        self.header_separator = header_separator
         self.total_items = total_items
         self.current_table = None
 
@@ -98,18 +94,27 @@ class DataPreprocessor:
     def is_base_table(self):
         return self.current_table.is_root or self.current_table.is_combined
 
+    def load_schema(
+        self,
+    ):
+        """"""
+        if isinstance(self.schema, (str, Path)):
+            self.schema = resolve_file_uri(self.schema)
+        if not isinstance(self.schema, jsonref.JsonRef):
+            self.schema = jsonref.JsonRef.replace_refs(self.schema)
+
+    def prepare_tables(self):
+        self.init_tables(self.root_tables)
+        if self.combined_tables:
+            self.init_tables(self.combined_tables, is_combined=True)
+
     def parse_schema(self):
         """
         Extract information from the schema.
         """
-        if isinstance(self.schema, (str, Path)):
-            self.schema = resolve_file_uri(self.schema)
-        self.init_tables(self.root_tables)
-        if not isinstance(self.schema, jsonref.JsonRef):
-            self.schema = jsonref.JsonRef.replace_refs(self.schema)
-        if self.combined_tables:
-            self.init_tables(self.combined_tables, is_combined=True)
-        separator = self.header_separator
+        self.load_schema()
+        self.prepare_tables()
+
         to_analyze = deque([("", "", {}, self.schema)])
 
         # TODO: check if recursion is better for field ordering
@@ -121,17 +126,21 @@ class DataPreprocessor:
             properties = prop.get("properties", {})
             if properties:
                 for key, item in properties.items():
+
                     if item.get("deprecated"):
                         continue
                     if hasattr(item, "__reference__") and item.__reference__.get("deprecated"):
                         continue
+
                     typeset = extract_type(item)
                     pointer = self.join_path(path, key)
                     self.current_table = self.get_table(pointer)
+
                     if not self.current_table:
                         continue
 
                     self.current_table.types[pointer] = typeset
+
                     if "object" in typeset:
                         to_analyze.append((pointer, key, properties, item))
                     elif "array" in typeset:
@@ -147,21 +156,24 @@ class DataPreprocessor:
                             # This means we in array of strings, so this becomes a single joinable column
                             typeset = ARRAY.format(items_type)
                             self.current_table.types[pointer] = JOINABLE
-                            self.current_table.add_column(pointer, typeset, _(pointer, self.language))
+                            self.add_column(pointer, typeset)
                     else:
                         if self.current_table.is_combined:
-                            pointer = separator + self.join_path(parent_key, key)
-                        self.current_table.add_column(pointer, typeset, _(pointer, self.language))
+                            pointer = SEPARATOR + self.join_path(parent_key, key)
+                        self.add_column(pointer, typeset)
             else:
                 # TODO: not sure what to do here
                 continue
+
+    def add_column(self, pointer, typeset):
+        self.current_table.add_column(pointer, typeset, _(pointer, self.language))
 
     def _add_table(self, table, pointer):
         self.tables[table.name] = table
         self.current_table = table
         self.get_table.cache_clear()
 
-    def _add_additional_table(self, pointer, abs_pointer, parent_key, key, item, separator="/"):
+    def add_additional_table(self, pointer, abs_pointer, parent_key, key, item):
         LOGGER.debug(_("Detected additional table: %s") % pointer)
         self.current_table.types[pointer] = ["array"]
         self._add_table(add_child_table(self.current_table, pointer, parent_key, key), pointer)
@@ -218,10 +230,10 @@ class DataPreprocessor:
         return pointer in self.current_table.path and pointer != "/buyer"
 
     def join_path(self, *args):
-        return self.header_separator.join(args)
+        return SEPARATOR.join(args)
 
     def get_paths_for_combined_table(self, parent_key, key):
-        pointer = self.header_separator + self.join_path(parent_key, key)
+        pointer = SEPARATOR + self.join_path(parent_key, key)
         return (pointer, pointer)
 
     def is_type_matched(self, pointer, item, item_type):
@@ -242,12 +254,24 @@ class DataPreprocessor:
             abs_path=abs_pointer,
         )
 
-    def handle_array_expanded(self, parent_table, pointer, item, abs_path, key):
-        should_split = len(item) >= self.table_threshold
-        if should_split:
-            parent_table.should_split = True
-            self.current_table.roll_up = True
-        recalculate_headers(parent_table, pointer, abs_path, key, item, should_split, self.header_separator)
+    def handle_array_expanded(self, pointer, item, abs_path, key):
+        splitted = len(item) >= self.table_threshold
+        if splitted:
+            self.current_table.parent.splitted = True
+            self.current_table.rolled_up = True
+
+    def is_array_col(self, abs_path):
+        chunks = abs_path.split(SEPARATOR)
+        path = self.join_path(*[p for p in chunks if not p.isdigit()])
+        return path in self.current_table
+
+    def clean_up_missing_arrays(self):
+        def drop(col):
+            is_array = table.is_array(col.id)
+            return is_array and col.hits == 0
+
+        for table in self.tables.values():
+            table.combined_columns = {col_id: col for col_id, col in table.combined_columns.items() if not drop(col)}
 
     def process_items(self, releases, with_preview=True):
         """
@@ -259,14 +283,13 @@ class DataPreprocessor:
         :param releases: The releases to analyze
         :param with_preview: Whether to generate previews for each table
         """
-
         for count, release in enumerate(releases):
 
             to_analyze = deque([("", "", "", {}, release)])
             rows = Rows(ocid=release["ocid"], buyer=release.get("buyer", {}), data=defaultdict(list))
 
             while to_analyze:
-                abs_path, path, parent_key, parent, record = to_analyze.pop()
+                abs_path, path, parent_key, parent, record = to_analyze.popleft()
                 for key, item in record.items():
                     pointer = self.join_path(path, key)
 
@@ -277,12 +300,11 @@ class DataPreprocessor:
                     if self.is_new_row(pointer):
                         self.inc_table_rows(item, rows, parent_key, record)
 
+                    self.extend_table_types(pointer, item)
                     item_type = self.current_table.types.get(pointer)
+
                     if not self.is_type_matched(pointer, item, item_type):
                         continue
-
-                    if self.current_table.name in COMBINED_TABLES:
-                        self.extend_table_types(pointer, item)
 
                     if isinstance(item, dict):
                         to_analyze.append(
@@ -323,11 +345,11 @@ class DataPreprocessor:
                                 LOGGER.debug(_("Detected additional table: %s") % pointer)
                                 self.current_table.types[pointer] = ["array"]
                                 parent_table = self.current_table
-                                self._add_additional_table(pointer, abs_pointer, parent_key, key, item)
+                                self.add_additional_table(pointer, abs_pointer, parent_key, key, item)
                                 self.add_preview_row(rows, record.get("id", ""), parent_key)
 
                             if parent_table.set_array(pointer, item):
-                                self.handle_array_expanded(parent_table, pointer, item, abs_path, key)
+                                self.handle_array_expanded(pointer, item, abs_path, key)
 
                             for i, value in enumerate(item):
                                 if isinstance(value, dict):
@@ -342,11 +364,15 @@ class DataPreprocessor:
                                         )
                                     )
                     else:
-                        root = get_root(self.current_table)
                         abs_pointer = self.join_path(abs_path, key)
                         if self.current_table.is_combined:
                             pointer, abs_pointer = self.get_paths_for_combined_table(parent_key, key)
-                        if abs_pointer not in root.combined_columns:
+                        col = self.current_table.columns.get(pointer)
+                        if col:
+                            if abs_pointer not in self.current_table:
+                                parent = self.current_table.parent
+                                parent.add_array_column(col, pointer, abs_pointer, max=self.table_threshold)
+                        else:
                             self.current_table.add_column(
                                 pointer,
                                 self.guess_type(item),
@@ -359,6 +385,7 @@ class DataPreprocessor:
                             if not pointer.startswith("/buyer"):
                                 self.current_table.set_preview_path(abs_pointer, pointer, item, self.table_threshold)
             yield count
+        self.clean_up_missing_arrays()
         self.total_items = count
 
     def dump(self, path):
