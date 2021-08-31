@@ -74,6 +74,7 @@ def test_writers_pretty_headers(spec, tmpdir, releases):
         xlsx_headers = read_xlsx_headers(xlsx, name)
         csv_headers = read_csv_headers(path)
         table = tables[name]
+
         for col in tables[name].available_rows(opts.split):
             title = table.titles.get(col)
             if col == "/tender/items/id":
@@ -145,6 +146,10 @@ def test_writers_flatten_count(spec, tmpdir, releases):
                     "split": False,
                     "pretty_headers": True,
                 },
+                "parties_ids": {
+                    "split": False,
+                    "pretty_headers": True,
+                },
             },
             "count": True,
         }
@@ -159,10 +164,14 @@ def test_writers_flatten_count(spec, tmpdir, releases):
     sheet = "tenders"
     path = workdir / f"{sheet}.csv"
     for headers in read_xlsx_headers(xlsx, sheet), read_csv_headers(path):
-        assert "Items Count" in headers
         assert "Tenderers Count" in headers
 
-    sheet = "parties"
+    sheet = "tenders_items"
+    path = workdir / f"{sheet}.csv"
+    for headers in read_xlsx_headers(xlsx, sheet), read_csv_headers(path):
+        assert "Items Count" in headers
+
+    sheet = "parties_ids"
     path = workdir / f"{sheet}.csv"
     for headers in read_xlsx_headers(xlsx, sheet), read_csv_headers(path):
         assert "Additional Identifiers Count" in headers
